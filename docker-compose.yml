@@ -1,0 +1,124 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: bulk_notify_postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-notification_db}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - notify_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d notification_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: bulk_notify_rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-guest}
+    networks:
+      - notify_net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  campaign-api:
+    build:
+      context: .
+      dockerfile: src/Campaign.Api/Dockerfile
+    container_name: bulk_notify_api
+    ports:
+      - "5080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-notification_db};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}"
+      RabbitMQ__HostName: "rabbitmq"
+      RabbitMQ__Port: "5672"
+      RabbitMQ__UserName: "${RABBITMQ_USER:-guest}"
+      RabbitMQ__Password: "${RABBITMQ_PASS:-guest}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - notify_net
+    restart: on-failure
+
+  notification-worker-1:
+    build:
+      context: .
+      dockerfile: src/Notification.Worker/Dockerfile
+    container_name: bulk_notify_worker_1
+    environment:
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-notification_db};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}"
+      RabbitMQ__HostName: "rabbitmq"
+      RabbitMQ__Port: "5672"
+      RabbitMQ__UserName: "${RABBITMQ_USER:-guest}"
+      RabbitMQ__Password: "${RABBITMQ_PASS:-guest}"
+      Worker__InstanceName: "Worker-Node-01"
+      Worker__SimulatedFailureRate: "0.20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - notify_net
+    restart: on-failure
+
+  notification-worker-2:
+    build:
+      context: .
+      dockerfile: src/Notification.Worker/Dockerfile
+    container_name: bulk_notify_worker_2
+    environment:
+      ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=${POSTGRES_DB:-notification_db};Username=${POSTGRES_USER:-postgres};Password=${POSTGRES_PASSWORD:-postgres}"
+      RabbitMQ__HostName: "rabbitmq"
+      RabbitMQ__Port: "5672"
+      RabbitMQ__UserName: "${RABBITMQ_USER:-guest}"
+      RabbitMQ__Password: "${RABBITMQ_PASS:-guest}"
+      Worker__InstanceName: "Worker-Node-02"
+      Worker__SimulatedFailureRate: "0.20"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - notify_net
+    restart: on-failure
+
+  admin-client:
+    build:
+      context: .
+      dockerfile: src/Admin.Client/Dockerfile
+    container_name: bulk_notify_admin_cli
+    environment:
+      API_BASE_URL: "http://campaign-api:8080"
+    depends_on:
+      - campaign-api
+    networks:
+      - notify_net
+    stdin_open: true
+    tty: true
+
+networks:
+  notify_net:
+    driver: bridge
+
+volumes:
+  pgdata:
