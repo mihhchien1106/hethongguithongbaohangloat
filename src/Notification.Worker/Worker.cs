@@ -1,3 +1,5 @@
+﻿using System.Net;
+using System.Net.Mail;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
@@ -53,35 +55,24 @@ public class Worker : BackgroundService
         {
             var body = ea.Body.ToArray();
             var json = Encoding.UTF8.GetString(body);
-            NotificationDispatchMessage? message = null;
-
             try
             {
-                message = JsonSerializer.Deserialize<NotificationDispatchMessage>(json);
-                if (message is null)
+                var message = JsonSerializer.Deserialize<NotificationDispatchMessage>(json);
+                if (message is not null)
                 {
-                    _channel.BasicAck(ea.DeliveryTag, multiple: false);
-                    return;
+                    await ProcessNotificationJobAsync(message, stoppingToken);
                 }
-
-                await ProcessNotificationJobAsync(message, stoppingToken);
                 _channel.BasicAck(ea.DeliveryTag, multiple: false);
             }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "[{WorkerName}] Lỗi nghiêm trọng khi xử lý message DeliveryTag={Tag}", _workerName, ea.DeliveryTag);
-                // Đẩy vào Dead-Letter Queue nếu lỗi không thể xử lý ở tầng hạ tầng
                 _channel.BasicNack(ea.DeliveryTag, multiple: false, requeue: false);
             }
         };
 
-        _channel.BasicConsume(
-            queue: RabbitMqConstants.QueueName,
-            autoAck: false,
-            consumer: consumer);
-
-        _logger.LogInformation("[{WorkerName}] Đang lắng nghe hàng đợi '{Queue}' (Tỷ lệ lỗi mô phỏng: {Rate:P0})...",
-            _workerName, RabbitMqConstants.QueueName, _simulatedFailureRate);
+        _channel.BasicConsume(queue: RabbitMqConstants.QueueName, autoAck: false, consumer: consumer);
+        _logger.LogInformation("[{WorkerName}] Đang lắng nghe hàng đợi '{Queue}'...", _workerName, RabbitMqConstants.QueueName);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -117,8 +108,6 @@ public class Worker : BackgroundService
         };
         _channel.QueueDeclare(RabbitMqConstants.QueueName, durable: true, exclusive: false, autoDelete: false, arguments: args);
         _channel.QueueBind(RabbitMqConstants.QueueName, RabbitMqConstants.ExchangeName, RabbitMqConstants.RoutingKey);
-
-        // Fair dispatch: mỗi worker nhận tối đa 1 job tại 1 thời điểm để chia tải đều giữa các worker
         _channel.BasicQos(prefetchSize: 0, prefetchCount: 1, global: false);
     }
 
@@ -128,52 +117,53 @@ public class Worker : BackgroundService
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
 
         var job = await db.NotificationJobs.FirstOrDefaultAsync(j => j.Id == msg.JobId, ct);
-        if (job is null)
-        {
-            _logger.LogWarning("[{WorkerName}] [CorrelationId: {CorrelationId}] Không tìm thấy Job {JobId} trong DB.",
-                _workerName, msg.CorrelationId, msg.JobId);
-            return;
-        }
-
-        // Idempotent Consumer: Nếu job đã Sent rồi thì bỏ qua, không gửi trùng
-        if (job.Status == DeliveryStatus.Sent)
-        {
-            _logger.LogInformation("[{WorkerName}] [CorrelationId: {CorrelationId}] Job {JobId} ({Recipient}) đã ở trạng thái Sent. Bỏ qua (Idempotent).",
-                _workerName, msg.CorrelationId, job.Id, job.RecipientAddress);
-            return;
-        }
+        if (job is null || job.Status == DeliveryStatus.Sent) return;
 
         job.Status = DeliveryStatus.Processing;
         job.ProcessedByWorker = _workerName;
         job.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        _logger.LogInformation("[{WorkerName}] [CorrelationId: {CorrelationId}] Đang gửi {Channel} tới {Recipient} (Lần thử #{Attempt})...",
-            _workerName, msg.CorrelationId, msg.Channel, msg.RecipientAddress, msg.AttemptNumber);
-
-        // Mô phỏng thời gian gọi cổng gửi Email/SMS (300ms - 900ms)
-        await Task.Delay(Random.Shared.Next(300, 900), ct);
-
-        // Kiểm tra điều kiện thất bại:
-        // 1. Nếu địa chỉ chứa từ khóa "fail" hoặc "error" -> lỗi cố định (trừ khi đã retry >= 1 lần thì cho qua để demo retry thành công)
-        // 2. Hoặc ngẫu nhiên theo tỷ lệ SimulatedFailureRate ở lần gửi đầu tiên
         bool shouldFail = false;
         string errorReason = string.Empty;
 
-        if (msg.RecipientAddress.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+        var smtpUser = _configuration["Smtp:Username"];
+        var smtpPass = _configuration["Smtp:Password"];
+        bool isRealEmailTarget = !msg.RecipientAddress.EndsWith("@example.com", StringComparison.OrdinalIgnoreCase);
+
+        // Nếu là email thật (không phải @example.com) và đã cấu hình SMTP Gmail -> Gửi email thật!
+        if (isRealEmailTarget && !string.IsNullOrWhiteSpace(smtpUser) && !string.IsNullOrWhiteSpace(smtpPass) && !smtpPass.Contains("xxxx"))
         {
-            shouldFail = true;
-            errorReason = "Địa chỉ người nhận không hợp lệ (Hard Bounce).";
+            try
+            {
+                _logger.LogInformation("[{WorkerName}] Đang gửi EMAIL THẬT qua SMTP tới {Recipient}...", _workerName, msg.RecipientAddress);
+                await SendRealEmailViaSmtpAsync(msg, smtpUser, smtpPass, ct);
+            }
+            catch (Exception ex)
+            {
+                shouldFail = true;
+                errorReason = $"Lỗi SMTP thực tế: {ex.Message}";
+            }
         }
-        else if (msg.RecipientAddress.Contains("fail", StringComparison.OrdinalIgnoreCase) && job.RetryCount == 0)
+        else
         {
-            shouldFail = true;
-            errorReason = "SMTP Gateway Timeout (Sẽ thành công khi chạy lại / Retry).";
-        }
-        else if (job.RetryCount == 0 && Random.Shared.NextDouble() < _simulatedFailureRate)
-        {
-            shouldFail = true;
-            errorReason = "Kết nối tới nhà cung cấp dịch vụ thông báo tạm thời gián đoạn (503 Service Unavailable).";
+            // Chế độ mô phỏng cho các email mẫu @example.com
+            await Task.Delay(Random.Shared.Next(300, 800), ct);
+            if (msg.RecipientAddress.Contains("invalid", StringComparison.OrdinalIgnoreCase))
+            {
+                shouldFail = true;
+                errorReason = "Địa chỉ người nhận không hợp lệ (Hard Bounce).";
+            }
+            else if (msg.RecipientAddress.Contains("fail", StringComparison.OrdinalIgnoreCase) && job.RetryCount == 0)
+            {
+                shouldFail = true;
+                errorReason = "SMTP Gateway Timeout (Sẽ thành công khi chạy lại / Retry).";
+            }
+            else if (job.RetryCount == 0 && Random.Shared.NextDouble() < _simulatedFailureRate)
+            {
+                shouldFail = true;
+                errorReason = "Kết nối tới nhà cung cấp dịch vụ tạm thời gián đoạn (503 Service Unavailable).";
+            }
         }
 
         if (shouldFail)
@@ -182,28 +172,20 @@ public class Worker : BackgroundService
             job.RetryCount += 1;
             job.ErrorMessage = errorReason;
             job.UpdatedAt = DateTime.UtcNow;
-
-            _logger.LogWarning("[{WorkerName}] [CorrelationId: {CorrelationId}] THẤT BẠI Job {JobId} -> {Recipient}: {Error}",
-                _workerName, msg.CorrelationId, job.Id, job.RecipientAddress, errorReason);
+            _logger.LogWarning("[{WorkerName}] THẤT BẠI -> {Recipient}: {Error}", _workerName, job.RecipientAddress, errorReason);
         }
         else
         {
             job.Status = DeliveryStatus.Sent;
-            if (msg.AttemptNumber > 1)
-            {
-                job.RetryCount = msg.AttemptNumber - 1;
-            }
+            if (msg.AttemptNumber > 1) job.RetryCount = msg.AttemptNumber - 1;
             job.ErrorMessage = null;
             job.SentAt = DateTime.UtcNow;
             job.UpdatedAt = DateTime.UtcNow;
-
-            _logger.LogInformation("[{WorkerName}] [CorrelationId: {CorrelationId}] THÀNH CÔNG Job {JobId} -> {Recipient}",
-                _workerName, msg.CorrelationId, job.Id, job.RecipientAddress);
+            _logger.LogInformation("[{WorkerName}] THÀNH CÔNG -> {Recipient}", _workerName, job.RecipientAddress);
         }
 
         await db.SaveChangesAsync(ct);
 
-        // Kiểm tra nếu toàn bộ job của chiến dịch đã xử lý xong (không còn Pending/Processing)
         var hasRemaining = await db.NotificationJobs
             .AnyAsync(j => j.CampaignId == msg.CampaignId &&
                           (j.Status == DeliveryStatus.Pending || j.Status == DeliveryStatus.Processing), ct);
@@ -216,9 +198,48 @@ public class Worker : BackgroundService
                 campaign.Status = CampaignStatus.Completed;
                 campaign.CompletedAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
-                _logger.LogInformation("[{WorkerName}] Chiến dịch {CampaignId} đã hoàn tất xử lý toàn bộ thông báo.", _workerName, campaign.Id);
             }
         }
+    }
+
+    private async Task SendRealEmailViaSmtpAsync(NotificationDispatchMessage msg, string smtpUser, string smtpPass, CancellationToken ct)
+    {
+        var host = _configuration["Smtp:Host"] ?? "smtp.gmail.com";
+        var port = int.Parse(_configuration["Smtp:Port"] ?? "587");
+
+        using var client = new SmtpClient(host, port)
+        {
+            Credentials = new NetworkCredential(smtpUser, smtpPass.Replace(" ", "")),
+            EnableSsl = true,
+            Timeout = 15000
+        };
+
+        var htmlBody = $@"
+            <div style='font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; border: 1px solid #e2e8f0; border-radius: 10px; overflow: hidden;'>
+                <div style='background: #0f3d6e; color: white; padding: 16px 24px;'>
+                    <h3 style='margin: 0;'>Hệ thống Thông báo Hàng loạt (Đề tài 11)</h3>
+                </div>
+                <div style='padding: 24px; color: #1e293b; line-height: 1.6;'>
+                    <p>Xin chào <b>{msg.RecipientName}</b>,</p>
+                    <p>{msg.Content}</p>
+                    <hr style='border: none; border-top: 1px solid #cbd5e1; margin: 20px 0;'/>
+                    <p style='font-size: 12px; color: #64748b;'>
+                        Được xử lý bất đồng bộ qua RabbitMQ bởi: <b>{_workerName}</b><br/>
+                        Mã truy vết (Correlation ID): <code>{msg.CorrelationId}</code>
+                    </p>
+                </div>
+            </div>";
+
+        using var mail = new MailMessage
+        {
+            From = new MailAddress(smtpUser, "Bulk Notification System"),
+            Subject = msg.Subject,
+            Body = htmlBody,
+            IsBodyHtml = true
+        };
+        mail.To.Add(new MailAddress(msg.RecipientAddress, msg.RecipientName));
+
+        await client.SendMailAsync(mail, ct);
     }
 
     public override void Dispose()

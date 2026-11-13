@@ -1,4 +1,4 @@
-services:
+﻿services:
   postgres:
     image: postgres:16-alpine
     container_name: bulk_notify_postgres
@@ -71,6 +71,10 @@ services:
       RabbitMQ__Password: "${RABBITMQ_PASS:-guest}"
       Worker__InstanceName: "Worker-Node-01"
       Worker__SimulatedFailureRate: "0.20"
+      Smtp__Host: "smtp.gmail.com"
+      Smtp__Port: "587"
+      Smtp__Username: "${SMTP_USER:-}"
+      Smtp__Password: "${SMTP_PASS:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -93,6 +97,10 @@ services:
       RabbitMQ__Password: "${RABBITMQ_PASS:-guest}"
       Worker__InstanceName: "Worker-Node-02"
       Worker__SimulatedFailureRate: "0.20"
+      Smtp__Host: "smtp.gmail.com"
+      Smtp__Port: "587"
+      Smtp__Username: "${SMTP_USER:-}"
+      Smtp__Password: "${SMTP_PASS:-}"
     depends_on:
       postgres:
         condition: service_healthy
@@ -122,3 +130,4 @@ networks:
 
 volumes:
   pgdata:
+
