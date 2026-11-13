@@ -1,4 +1,4 @@
-using Campaign.Api;
+﻿using Campaign.Api;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using Shared.Contracts.Data;
@@ -40,6 +40,9 @@ using (var scope = app.Services.CreateScope())
         }
     }
 }
+
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 app.MapHealthChecks("/health");
 
@@ -318,3 +321,4 @@ app.MapPost("/campaigns/{id:guid}/retry-failed", async (
 });
 
 app.Run();
+

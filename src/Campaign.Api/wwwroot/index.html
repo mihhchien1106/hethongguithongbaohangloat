@@ -1,0 +1,197 @@
+﻿<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bulk Notification Dashboard - Đề tài 11</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+    <style>
+        body { background-color: #f4f7fb; font-family: 'Segoe UI', system-ui, sans-serif; }
+        .navbar-custom { background: linear-gradient(135deg, #0f3d6e 0%, #1b5e91 100%); }
+        .card { border: none; border-radius: 12px; box-shadow: 0 2px 12px rgba(15, 61, 110, 0.07); }
+        .campaign-row { cursor: pointer; }
+        .campaign-row.active-row { background-color: #e2eeff !important; border-left: 4px solid #0f3d6e; }
+        .progress { height: 10px; border-radius: 6px; }
+        .worker-badge { font-family: monospace; font-size: 0.82rem; background-color: #eef2f7; color: #1e293b; border: 1px solid #cbd5e1; }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark navbar-custom shadow-sm py-3 mb-4">
+        <div class="container-fluid px-4">
+            <a class="navbar-brand fw-bold" href="#"><i class="bi bi-broadcast-pin me-2 text-warning"></i>HỆ THỐNG GỬI THÔNG BÁO HÀNG LOẠT (WEB DASHBOARD)</a>
+            <div class="d-flex align-items-center gap-3">
+                <div class="form-check form-switch text-white mb-0">
+                    <input class="form-check-input" type="checkbox" id="autoRefreshToggle" checked>
+                    <label class="form-check-label small" for="autoRefreshToggle">Tự động cập nhật (2s)</label>
+                </div>
+                <a href="http://localhost:15672" target="_blank" class="btn btn-sm btn-outline-light">RabbitMQ UI</a>
+                <button class="btn btn-sm btn-warning fw-semibold" data-bs-toggle="modal" data-bs-target="#createModal">
+                    <i class="bi bi-plus-circle-fill me-1"></i>Tạo chiến dịch mới
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container-fluid px-4 pb-5">
+        <div class="row g-3 mb-4">
+            <div class="col-md-3"><div class="card p-3 border-start border-primary border-4"><div class="text-muted small fw-semibold">TỔNG CHIẾN DỊCH</div><div class="fs-3 fw-bold text-primary" id="kpiTotal">0</div></div></div>
+            <div class="col-md-3"><div class="card p-3 border-start border-warning border-4"><div class="text-muted small fw-semibold">ĐANG CHỜ (PENDING)</div><div class="fs-3 fw-bold text-warning" id="kpiPending">0</div></div></div>
+            <div class="col-md-3"><div class="card p-3 border-start border-success border-4"><div class="text-muted small fw-semibold">THÀNH CÔNG (SENT)</div><div class="fs-3 fw-bold text-success" id="kpiSent">0</div></div></div>
+            <div class="col-md-3"><div class="card p-3 border-start border-danger border-4"><div class="text-muted small fw-semibold">THẤT BẠI (FAILED)</div><div class="fs-3 fw-bold text-danger" id="kpiFailed">0</div></div></div>
+        </div>
+
+        <div id="alertBox"></div>
+
+        <div class="row g-4">
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center border-bottom">
+                        <h6 class="mb-0 fw-bold">Danh sách Chiến dịch</h6>
+                        <button class="btn btn-sm btn-light border" onclick="loadCampaigns()"><i class="bi bi-arrow-clockwise"></i> Làm mới</button>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-hover align-middle mb-0">
+                            <thead class="table-light small text-muted">
+                                <tr><th class="ps-3">Chiến dịch</th><th>Kênh</th><th>Trạng thái</th><th>Tiến độ (Sent/Fail/Tổng)</th><th class="text-end pe-3">Thao tác</th></tr>
+                            </thead>
+                            <tbody id="campaignsBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-lg-6">
+                <div class="card h-100">
+                    <div class="card-header bg-white py-3 d-flex justify-content-between align-items-center border-bottom">
+                        <div>
+                            <h6 class="mb-0 fw-bold">Chi tiết Kết quả Gửi (Deliveries)</h6>
+                            <small class="text-muted" id="selectedTitle">Chọn một chiến dịch bên trái để xem</small>
+                        </div>
+                        <select class="form-select form-select-sm" id="statusFilter" onchange="loadDeliveries()" style="width:150px;">
+                            <option value="">Tất cả trạng thái</option>
+                            <option value="Pending">Pending</option>
+                            <option value="Sent">Sent</option>
+                            <option value="Failed">Failed</option>
+                        </select>
+                    </div>
+                    <div class="table-responsive" style="max-height: 520px; overflow-y: auto;">
+                        <table class="table table-sm table-hover align-middle mb-0">
+                            <thead class="table-light small text-muted sticky-top">
+                                <tr><th class="ps-3">Người nhận</th><th>Trạng thái</th><th class="text-center">Retry</th><th>Worker xử lý</th><th class="pe-3">Ghi chú / Lỗi</th></tr>
+                            </thead>
+                            <tbody id="deliveriesBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal fade" id="createModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header navbar-custom text-white">
+                    <h5 class="modal-title fw-bold">Tạo Chiến dịch Thông báo Mới</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-8"><label class="form-label fw-semibold">Tên chiến dịch</label><input type="text" class="form-control" id="cName" value="Thông báo Bảo trì Hệ thống Q4"></div>
+                        <div class="col-md-4"><label class="form-label fw-semibold">Kênh gửi</label><select class="form-select" id="cChannel"><option value="Email">Email</option><option value="SMS">SMS</option><option value="Push">Push</option></select></div>
+                        <div class="col-12"><label class="form-label fw-semibold">Tiêu đề</label><input type="text" class="form-control" id="cSubject" value="[Quan trọng] Lịch nâng cấp máy chủ định kỳ"></div>
+                        <div class="col-12"><label class="form-label fw-semibold">Nội dung</label><textarea class="form-control" id="cContent" rows="2">Hệ thống sẽ bảo trì từ 00:00 đến 02:00 sáng mai.</textarea></div>
+                        <div class="col-12">
+                            <div class="d-flex justify-content-between mb-1">
+                                <label class="form-label fw-semibold mb-0">Danh sách người nhận (email,Họ tên)</label>
+                                <button type="button" class="btn btn-sm btn-outline-primary" onclick="genSample(15)">Sinh mẫu 15 người</button>
+                            </div>
+                            <textarea class="form-control font-monospace small" id="cRecipients" rows="5"></textarea>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+                    <button type="button" class="btn btn-primary fw-semibold" onclick="createCampaign()">Tạo Chiến dịch</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let selectedId = null, selectedName = '';
+        function badge(s) {
+            const map = { Draft:'secondary', Running:'primary', Completed:'success', Pending:'warning text-dark', Processing:'info text-dark', Sent:'success', Failed:'danger' };
+            return `<span class="badge bg-${map[s] || 'secondary'}">${s}</span>`;
+        }
+        function genSample(n) {
+            const arr = [];
+            for(let i=1; i<=n; i++) arr.push(`${i%5===0 ? `user${i}.fail@example.com` : `user${i}@example.com`},Người nhận #${i}`);
+            document.getElementById('cRecipients').value = arr.join('\n');
+        }
+        async function loadCampaigns() {
+            const res = await fetch('/campaigns');
+            const list = await res.json();
+            let p=0, s=0, f=0;
+            document.getElementById('campaignsBody').innerHTML = list.map(c => {
+                p += (c.pendingCount + c.processingCount); s += c.sentCount; f += c.failedCount;
+                const tot = c.totalRecipients || 1;
+                return `<tr class="campaign-row ${c.id===selectedId?'active-row':''}" onclick="selectCamp('${c.id}','${c.name}')">
+                    <td class="ps-3"><div class="fw-bold">${c.name}</div><div class="small text-muted">${c.subject}</div></td>
+                    <td><span class="badge bg-light text-dark border">${c.channel}</span></td>
+                    <td>${badge(c.status)}</td>
+                    <td>
+                        <div class="d-flex justify-content-between small mb-1"><span class="text-success fw-bold">${c.sentCount} Sent</span><span class="text-danger fw-bold">${c.failedCount} Fail</span><span>${c.totalRecipients} Tổng</span></div>
+                        <div class="progress"><div class="progress-bar bg-success" style="width:${Math.round(c.sentCount/tot*100)}%"></div><div class="progress-bar bg-danger" style="width:${Math.round(c.failedCount/tot*100)}%"></div></div>
+                    </td>
+                    <td class="text-end pe-3" onclick="event.stopPropagation()">
+                        <button class="btn btn-sm btn-primary me-1" ${c.pendingCount===0?'disabled':''} onclick="startCamp('${c.id}')">Start</button>
+                        <button class="btn btn-sm btn-outline-danger" ${c.failedCount===0?'disabled':''} onclick="retryCamp('${c.id}')">Retry (${c.failedCount})</button>
+                    </td>
+                </tr>`;
+            }).join('');
+            document.getElementById('kpiTotal').innerText = list.length;
+            document.getElementById('kpiPending').innerText = p;
+            document.getElementById('kpiSent').innerText = s;
+            document.getElementById('kpiFailed').innerText = f;
+            if(!selectedId && list.length > 0) selectCamp(list[0].id, list[0].name);
+        }
+        function selectCamp(id, name) {
+            selectedId = id; selectedName = name;
+            document.getElementById('selectedTitle').innerHTML = `Chiến dịch: <b>${name}</b> (<code>${id.substring(0,8)}</code>)`;
+            loadCampaigns(); loadDeliveries();
+        }
+        async function loadDeliveries() {
+            if(!selectedId) return;
+            const st = document.getElementById('statusFilter').value;
+            const res = await fetch(`/campaigns/${selectedId}/deliveries` + (st ? `?status=${st}` : ''));
+            const items = await res.json();
+            document.getElementById('deliveriesBody').innerHTML = items.map(d => `
+                <tr>
+                    <td class="ps-3"><div class="fw-semibold small">${d.recipientAddress}</div><div class="text-muted" style="font-size:0.75rem">${d.recipientName}</div></td>
+                    <td>${badge(d.status)}</td>
+                    <td class="text-center fw-bold">${d.retryCount}</td>
+                    <td>${d.processedByWorker ? `<span class="badge worker-badge">${d.processedByWorker}</span>` : '-'}</td>
+                    <td class="pe-3 small ${d.errorMessage?'text-danger fw-semibold':'text-success'}">${d.errorMessage || 'OK'}</td>
+                </tr>`).join('');
+        }
+        async function createCampaign() {
+            const recipients = document.getElementById('cRecipients').value.split('\n').map(l=>l.trim()).filter(Boolean).map(l=>{
+                const p = l.split(','); return { address: p[0].trim(), name: p[1] ? p[1].trim() : 'Khách hàng' };
+            });
+            const body = { name: document.getElementById('cName').value, subject: document.getElementById('cSubject').value, content: document.getElementById('cContent').value, channel: document.getElementById('cChannel').value, recipients };
+            const res = await fetch('/campaigns', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+            if(res.ok) {
+                const c = await res.json();
+                bootstrap.Modal.getInstance(document.getElementById('createModal')).hide();
+                selectCamp(c.id, c.name);
+            }
+        }
+        async function startCamp(id) { await fetch(`/campaigns/${id}/start`, { method:'POST' }); selectCamp(id, selectedName); }
+        async function retryCamp(id) { await fetch(`/campaigns/${id}/retry-failed`, { method:'POST' }); selectCamp(id, selectedName); }
+        genSample(15); loadCampaigns();
+        setInterval(() => { if(document.getElementById('autoRefreshToggle').checked) { loadCampaigns(); if(selectedId) loadDeliveries(); } }, 2000);
+    </script>
+</body>
+</html>
